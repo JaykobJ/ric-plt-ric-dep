@@ -24,7 +24,7 @@ data:
     "local":
       "host": ":8080"
     "logger":
-      "level": 3
+      "level": 4
     "rmr":
       "protPort" : "tcp:4560"
       "maxSize": 8192
