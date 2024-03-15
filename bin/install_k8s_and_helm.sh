@@ -61,10 +61,13 @@ start_ipv6_if () {
   fi
 }
 
-KUBEV="1.16.0"
-KUBECNIV="0.7.5"
+KUBEV="1.18.0" #1.16.0
+KUBECNIV="0.7.5" #0.7.5
 HELMV="3.5.4"
 DOCKERV="20.10.21"
+
+sudo apt-get update
+
 
 echo running ${0}
 while getopts ":k:d:e:n:c" o; do
@@ -102,7 +105,8 @@ IPV6IF=""
 rm -rf /opt/config
 mkdir -p /opt/config
 echo "" > /opt/config/docker_version.txt
-echo "1.16.0" > /opt/config/k8s_version.txt
+#echo "1.16.0" > /opt/config/k8s_version.txt
+echo "1.18.0" > /opt/config/k8s_version.txt
 echo "0.7.5" > /opt/config/k8s_cni_version.txt
 echo "3.5.4" > /opt/config/helm_version.txt
 echo "$(hostname -I)" > /opt/config/host_private_ip_addr.txt
@@ -121,9 +125,10 @@ modprobe -- ip_vs
 modprobe -- ip_vs_rr
 modprobe -- ip_vs_wrr
 modprobe -- ip_vs_sh
-modprobe -- nf_conntrack_ipv4
-modprobe -- nf_conntrack_ipv6
-modprobe -- nf_conntrack_proto_sctp
+#modprobe -- nf_conntrack_ipv4
+#modprobe -- nf_conntrack_ipv6
+#modprobe -- nf_conntrack_proto_sctp
+modprobe -- nf_conntrack
 
 if [ ! -z "$IPV6IF" ]; then
   start_ipv6_if $IPV6IF
@@ -178,14 +183,22 @@ fi
 
 echo "docker version to use = "${DOCKERVERSION}
 
-curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
-echo 'deb http://apt.kubernetes.io/ kubernetes-xenial main' > /etc/apt/sources.list.d/kubernetes.list
+# DEPRECATED PACKAGE REPOSITORY FROM 1.1.2024
+#curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+#echo 'deb http://apt.kubernetes.io/ kubernetes-xenial main' > /etc/apt/sources.list.d/kubernetes.list
+
+# NEW Kubernetes package repository. Does not work for < v1.24
+#sudo mkdir -p -m 755 /etc/apt/keyrings
+#sudo chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+#curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+#echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
 
 mkdir -p /etc/apt/apt.conf.d
 echo "APT::Acquire::Retries \"3\";" > /etc/apt/apt.conf.d/80-retries
 
 apt-get update
-RES=$(apt-get install -y  curl jq netcat make ipset moreutils 2>&1)
+RES=$(apt-get install -y  curl jq netcat make ipset moreutils socat 2>&1)
 if [[ $RES == */var/lib/dpkg/lock* ]]; then
   echo "Fail to get dpkg lock.  Wait for any other package installation"
   echo "process to finish, then rerun this script"
@@ -231,17 +244,48 @@ systemctl restart docker
 if [ -z ${CNIVERSION} ]; then
   apt-get install -y $APTOPTS kubernetes-cni
 else
-  apt-get install -y $APTOPTS kubernetes-cni=${CNIVERSION}
+  #apt-get install -y $APTOPTS kubernetes-cni
+  #apt-get install -y $APTOPTS kubernetes-cni=${CNIVERSION}
+  # Install CNI plugins
+  CNI_PLUGINS_VERSION="v0.7.5"
+  ARCH="amd64"
+  DEST="/opt/cni/bin"
+  sudo mkdir -p "$DEST"
+  curl -L "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}/cni-plugins-${ARCH}-${CNI_PLUGINS_VERSION}.tgz" | sudo tar -C "$DEST" -xz
 fi
 
 if [ -z ${KUBEVERSION} ]; then
   apt-get install -y $APTOPTS kubeadm kubelet kubectl
 else
-  apt-get install -y $APTOPTS kubeadm=${KUBEVERSION} kubelet=${KUBEVERSION} kubectl=${KUBEVERSION}
+  #apt-get install -y $APTOPTS kubeadm kubelet kubectl
+  #apt-get install -y $APTOPTS kubeadm=${KUBEVERSION} kubelet=${KUBEVERSION} kubectl=${KUBEVERSION}
+  # Define the directory to download command files
+  DOWNLOAD_DIR="/usr/bin"
+
+  # Install crictl (required for kubeadm / Kubelet Container Runtime Interface (CRI))
+  CRICTL_VERSION="v1.18.0"
+  ARCH="amd64"
+  curl -L "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz" | sudo tar -C $DOWNLOAD_DIR -xz
+
+  # Install kubeadm, kubelet and add a kubelet systemd service:
+  RELEASE="v1.18.0"
+  ARCH="amd64"
+  cd $DOWNLOAD_DIR
+  sudo curl -L --remote-name-all https://dl.k8s.io/release/${RELEASE}/bin/linux/${ARCH}/{kubeadm,kubelet}
+  sudo chmod +x {kubeadm,kubelet}
+
+  RELEASE_VERSION="v0.3.0"
+  curl -sSL "https://raw.githubusercontent.com/kubernetes/release/${RELEASE_VERSION}/cmd/kubepkg/templates/latest/deb/kubelet/lib/systemd/system/kubelet.service" | sed "s:/usr/bin:${DOWNLOAD_DIR}:g" | sudo tee /etc/systemd/system/kubelet.service
+  sudo mkdir -p /etc/systemd/system/kubelet.service.d
+  curl -sSL "https://raw.githubusercontent.com/kubernetes/release/${RELEASE_VERSION}/cmd/kubepkg/templates/latest/deb/kubeadm/10-kubeadm.conf" | sed "s:/usr/bin:${DOWNLOAD_DIR}:g" | sudo tee /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+
+  # Install kubectl
+  cd ~/nsoran/ric-dep/bin
+  curl -LO https://dl.k8s.io/release/${RELEASE}/bin/linux/${ARCH}/kubectl
+  sudo install -o root -g root -m 0755 kubectl /usr/bin/kubectl
 fi
 
 apt-mark hold docker.io kubernetes-cni kubelet kubeadm kubectl
-
 
 kubeadm config images pull --kubernetes-version=${KUBEV}
 
@@ -299,6 +343,23 @@ apiVersion: kubeproxy.config.k8s.io/v1alpha1
 kind: KubeProxyConfiguration
 mode: ipvs
 EOF
+#  elif [[ ${KUBEV} == 1.2* ]]; then
+#  cat <<EOF > /root/config.yaml
+#apiVersion: kubeadm.k8s.io/v1beta3
+#kubernetesVersion: v${KUBEV}
+#kind: ClusterConfiguration
+#apiServer:
+#  extraArgs:
+#    feature-gates: SCTPSupport=true
+#networking:
+#  dnsDomain: cluster.local
+#  podSubnet: 10.244.0.0/16
+#  serviceSubnet: 10.96.0.0/12
+#---
+#apiVersion: kubeproxy.config.k8s.io/v1alpha1
+#kind: KubeProxyConfiguration
+#mode: ipvs
+#EOF
   else
     echo "Unsupported Kubernetes version requested.  Bail."
     exit
