@@ -214,16 +214,33 @@ fi
 
 APTOPTS="--allow-downgrades --allow-change-held-packages --allow-unauthenticated --ignore-hold "
 
-for PKG in kubeadm docker.io docker-ce-cli; do
+for PKG in kubeadm docker-ce-cli; do
   INSTALLED_VERSION=$(dpkg --list |grep ${PKG} |tr -s " " |cut -f3 -d ' ')
   if [ ! -z ${INSTALLED_VERSION} ]; then
     if [ "${PKG}" == "kubeadm" ]; then
       kubeadm reset -f
+      apt-get purge -y $APTOPTS kubeadm kubelet kubectl kubernetes-cni
+
+      rm -rf /etc/cni/net.d
       rm -rf ~/.kube
-      apt-get -y $APTOPTS remove kubeadm kubelet kubectl kubernetes-cni
+      rm -rf /etc/cni
+      rm -rf /etc/kubernetes
+      rm -rf /var/lib/etcd
+      rm -rf /var/lib/kubelet
     else
-      docker stop $(sudo docker ps -aq)
-      apt-get -y $APTOPTS remove docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      docker stop $(docker ps -a -q)
+      docker rm $(docker ps -a -q)
+      apt-get purge -y $APTOPTS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+      # Delete Docker directories
+      rm -rf /var/lib/docker /etc/docker
+      rm /etc/apparmor.d/docker
+      rm -rf /var/run/docker.sock
+      rm -rf /usr/bin/docker-compose
+      rm -rf /var/run/docker
+      rm -rf /var/lib/docker
+      rm -rf /var/lib/containerd
+      systemctl stop docker.socket
     fi
   fi
 done
@@ -383,7 +400,7 @@ EOF
   export KUBECONFIG=/root/.kube/config
   echo "KUBECONFIG=${KUBECONFIG}" >> /etc/environment
 
-  kubectl get pods --all-namespaces
+  kubectl get nodes --all-namespaces
 
   # we refer to version 0.18.1 because later versions use namespace kube-flannel instead of kube-system TODO
   #kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/v0.18.1/Documentation/kube-flannel.yml"
