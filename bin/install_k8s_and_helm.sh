@@ -63,7 +63,7 @@ start_ipv6_if () {
 
 KUBEV="1.29.0" #1.16.0
 KUBECNIV="1.3.0" #0.7.5
-HELMV="3.5.4"
+HELMV="3.14.0" #3.5.4
 DOCKERV="23.0.6" #20.10.21
 
 echo running ${0}
@@ -404,7 +404,9 @@ EOF
 
   # we refer to version 0.18.1 because later versions use namespace kube-flannel instead of kube-system TODO
   #kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/v0.18.1/Documentation/kube-flannel.yml"
+  # kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/v0.24.0/Documentation/kube-flannel.yml"
 
+  # Calico that uses kube-system namespace
   kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.0/manifests/calico.yaml
 
   # Install Calico
