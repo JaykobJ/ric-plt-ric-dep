@@ -61,10 +61,10 @@ start_ipv6_if () {
   fi
 }
 
-KUBEV="1.29.0" #1.16.0
+KUBEV="1.29.2" #1.16.0
 KUBECNIV="1.3.0" #0.7.5
-HELMV="3.14.0" #3.5.4
-DOCKERV="23.0.6" #20.10.21
+HELMV="3.14.3" #3.5.4
+DOCKERV="25.0.4" #20.10.21
 
 echo running ${0}
 while getopts ":k:d:e:n:c" o; do
@@ -146,6 +146,7 @@ if [ ! -z $SWAPFILES ]; then
     fi
   done
 fi
+
 
 
 #echo "### Docker version  = "${DOCKERV}
@@ -247,6 +248,28 @@ done
 apt-get autoclean -y
 apt-get autoremove -y
 
+##
+## SETUP CONTAINER RUNTIMES
+##
+
+cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+EOF
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+# sysctl params required by setup, params persist across reboots
+cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+
+# Apply sysctl params without reboot
+sudo sysctl --system
+
 if [ -z ${DOCKERVERSION} ]; then
   apt-get install -y $APTOPTS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 else
@@ -265,16 +288,16 @@ EOF
 
 rm /etc/containerd/config.toml
 containerd config default > /etc/containerd/config.toml
+sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml
 sed -i 's@sandbox_image = \"registry.k8s.io\/pause:3.6\"@sandbox_image = \"registry.k8s.io\/pause:3.9\"@g' /etc/containerd/config.toml
 
 mkdir -p /etc/systemd/system/docker.service.d
-systemctl restart docker
-systemctl enable docker
-systemctl restart containerd
-systemctl enable containerd
-systemctl restart docker.service
 systemctl enable docker.service
+systemctl enable containerd.service
 systemctl daemon-reload
+systemctl restart docker
+systemctl restart containerd
+
 
 if [ -z ${CNIVERSION} ]; then
   apt-get install -y $APTOPTS kubernetes-cni
@@ -290,7 +313,6 @@ fi
 
 apt-mark hold kubernetes-cni kubelet kubeadm kubectl docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-systemctl restart kubelet
 systemctl enable --now kubelet
 
 kubeadm config images pull --kubernetes-version=${KUBEV}
@@ -356,12 +378,18 @@ kubernetesVersion: v${KUBEV}
 kind: ClusterConfiguration
 networking:
   dnsDomain: cluster.local
-  podSubnet: 10.244.0.0/16
-  serviceSubnet: 10.96.0.0/12
+  podSubnet: 192.168.0.0/16
+  serviceSubnet: 172.16.0.0/12
 ---
 apiVersion: kubeproxy.config.k8s.io/v1alpha1
 kind: KubeProxyConfiguration
 mode: ipvs
+ipvs:
+  excludeCIDRs: ["10.0.0.0/8"]
+---
+kind: KubeletConfiguration
+apiVersion: kubelet.config.k8s.io/v1beta1
+cgroupDriver: systemd
 EOF
   else
     echo "Unsupported Kubernetes version requested.  Bail."
@@ -404,7 +432,8 @@ EOF
 
   # we refer to version 0.18.1 because later versions use namespace kube-flannel instead of kube-system TODO
   #kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/v0.18.1/Documentation/kube-flannel.yml"
-  # kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/v0.24.0/Documentation/kube-flannel.yml"
+  #kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/v0.24.0/Documentation/kube-flannel.yml"
+  #kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml"
 
   # Calico that uses kube-system namespace
   kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.0/manifests/calico.yaml
@@ -417,9 +446,11 @@ EOF
   #curl -O https://raw.githubusercontent.com/projectcalico/calico/v3.27.2/manifests/custom-resources.yaml
   #sed -i 's@cidr: 192.168.0.0\/16@cidr: 10.244.0.0\/16@g' custom-resources.yaml
   #kubectl create -f custom-resources.yaml
+  #kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.2/manifests/custom-resources.yaml
 
-  wait_for_pods_running 9 kube-system
-  
+  #wait_for_pods_running 8 kube-system
+  sleep 120  
+
   kubectl taint nodes --all node-role.kubernetes.io/control-plane-
   kubectl taint nodes --all node-role.kubernetes.io/master-
 
