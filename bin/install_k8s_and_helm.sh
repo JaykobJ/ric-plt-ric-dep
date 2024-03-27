@@ -61,8 +61,8 @@ start_ipv6_if () {
   fi
 }
 
-KUBEV="1.29.2" #1.16.0
-KUBECNIV="1.3.0" #0.7.5
+KUBEV="1.26.15" #1.16.0
+KUBECNIV="1.1.1" #0.7.5
 HELMV="3.14.3" #3.5.4
 DOCKERV="25.0.4" #20.10.21
 
@@ -188,8 +188,8 @@ echo "docker version to use = "${DOCKERVERSION}
 # NEW Kubernetes package repository. Does not work for < v1.24
 sudo mkdir -p -m 755 /etc/apt/keyrings
 sudo chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-curl -fsSL "https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key" | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+curl -fsSL "https://pkgs.k8s.io/core:/stable:/v1.26/deb/Release.key" | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.26/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
 
 
 # Add Docker's official GPG key:
@@ -289,7 +289,7 @@ EOF
 rm /etc/containerd/config.toml
 containerd config default > /etc/containerd/config.toml
 sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml
-sed -i 's@sandbox_image = \"registry.k8s.io\/pause:3.6\"@sandbox_image = \"registry.k8s.io\/pause:3.9\"@g' /etc/containerd/config.toml
+#sed -i 's@sandbox_image = \"registry.k8s.io\/pause:3.6\"@sandbox_image = \"registry.k8s.io\/pause:3.9\"@g' /etc/containerd/config.toml
 
 mkdir -p /etc/systemd/system/docker.service.d
 systemctl enable docker.service
@@ -371,7 +371,7 @@ apiVersion: kubeproxy.config.k8s.io/v1alpha1
 kind: KubeProxyConfiguration
 mode: ipvs
 EOF
-  elif [[ ${KUBEV} == 1.29.* ]]; then
+  elif [[ ${KUBEV} == 1.2* ]]; then
   cat <<EOF > /root/config.yaml
 apiVersion: kubeadm.k8s.io/v1beta3
 kubernetesVersion: v${KUBEV}
