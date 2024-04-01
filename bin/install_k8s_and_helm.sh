@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
 #
 ################################################################################
 #   Copyright (c) 2019 AT&T Intellectual Property.                             #
@@ -102,7 +102,7 @@ IPV6IF=""
 
 rm -rf /opt/config
 mkdir -p /opt/config
-echo "" > /opt/config/docker_version.txt
+echo "${DOCKERV}" > /opt/config/docker_version.txt
 echo "${KUBEV}" > /opt/config/k8s_version.txt
 echo "${KUBECNIV}" > /opt/config/k8s_cni_version.txt
 echo "${HELMV}" > /opt/config/helm_version.txt
@@ -150,7 +150,7 @@ fi
 
 
 
-#echo "### Docker version  = "${DOCKERV}
+echo "### Docker version  = "${DOCKERV}
 echo "### k8s version     = "${KUBEV}
 echo "### helm version    = "${HELMV}
 echo "### k8s cni version = "${KUBECNIV}
@@ -449,8 +449,7 @@ EOF
   #kubectl create -f custom-resources.yaml
   #kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.2/manifests/custom-resources.yaml
 
-  #wait_for_pods_running 8 kube-system
-  sleep 120  
+  wait_for_pods_running 9 kube-system
 
   kubectl taint nodes --all node-role.kubernetes.io/control-plane-
   kubectl taint nodes --all node-role.kubernetes.io/master-

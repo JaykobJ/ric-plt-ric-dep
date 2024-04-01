@@ -215,7 +215,7 @@ cluster:
 proxy:
   # Enable creating a Kubernetes service for the proxy
   enabled: true
-  type: LoadBalancer
+  type: NodePort
   # To specify annotations or labels for the proxy service, add them to the respective
   # "annotations" or "labels" dictionaries below.
   annotations: {}
@@ -231,22 +231,22 @@ proxy:
   http:
     # Enable plaintext HTTP listen for the proxy
     enabled: true
-    servicePort: 80
-    containerPort: 8000
+    servicePort: 32080
+    containerPort: 32080
     # Set a nodePort which is available if service type is NodePort
-    # nodePort: 32080
+    nodePort: 32080
     # Additional listen parameters, e.g. "reuseport", "backlog=16384"
     parameters: []
 
   tls:
     # Enable HTTPS listen for the proxy
     enabled: true
-    servicePort: 443
-    containerPort: 8443
+    servicePort: 32443
+    containerPort: 32443
     # Set a target port for the TLS port in proxy service
     # overrideServiceTargetPort: 8000
     # Set a nodePort which is available if service type is NodePort
-    # nodePort: 32443
+    nodePort: 32443
     # Additional listen parameters, e.g. "reuseport", "backlog=16384"
     parameters:
     - http2
