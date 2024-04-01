@@ -4,6 +4,10 @@ Create a default fully qualified app name.
 We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
 */}}
 
+{{- define "kong.namespace" -}}
+{{- default .Release.Namespace .Values.namespace -}}
+{{- end -}}
+
 {{- define "kong.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
@@ -23,6 +27,9 @@ helm.sh/chart: {{ template "kong.chart" . }}
 app.kubernetes.io/instance: "{{ .Release.Name }}"
 app.kubernetes.io/managed-by: "{{ .Release.Service }}"
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- range $key, $value := .Values.extraLabels }}
+{{ $key }}: {{ $value | quote }}
+{{- end }}
 {{- end -}}
 
 {{- define "kong.selectorLabels" -}}
@@ -45,84 +52,263 @@ app.kubernetes.io/instance: "{{ .Release.Name }}"
 Create the name of the service account to use
 */}}
 {{- define "kong.serviceAccountName" -}}
-{{- if .Values.ingressController.serviceAccount.create -}}
-    {{ default (include "kong.fullname" .) .Values.ingressController.serviceAccount.name }}
+{{- if .Values.deployment.serviceAccount.create -}}
+    {{ default (include "kong.fullname" .) .Values.deployment.serviceAccount.name }}
 {{- else -}}
-    {{ default "default" .Values.ingressController.serviceAccount.name }}
+    {{ default "default" .Values.deployment.serviceAccount.name }}
 {{- end -}}
 {{- end -}}
 
 {{/*
-Create the KONG_PROXY_LISTEN value string
+Create Ingress resource for a Kong service
 */}}
-{{- define "kong.kongProxyListenValue" -}}
-
-{{- if and .Values.proxy.http.enabled .Values.proxy.tls.enabled -}}
-   0.0.0.0:{{ .Values.proxy.http.containerPort }},0.0.0.0:{{ .Values.proxy.tls.containerPort }} ssl
-{{- else -}}
-{{- if .Values.proxy.http.enabled -}}
-   0.0.0.0:{{ .Values.proxy.http.containerPort }}
-{{- end -}}
-{{- if .Values.proxy.tls.enabled -}}
-   0.0.0.0:{{ .Values.proxy.tls.containerPort }} ssl
-{{- end -}}
-{{- end -}}
-
+{{- define "kong.ingress" -}}
+{{- $servicePort := include "kong.ingress.servicePort" . }}
+{{- $path := .ingress.path -}}
+{{- $hostname := .ingress.hostname -}}
+apiVersion: {{ .ingressVersion }}
+kind: Ingress
+metadata:
+  name: {{ .fullName }}-{{ .serviceName }}
+  namespace: {{ .namespace }}
+  labels:
+  {{- .metaLabels | nindent 4 }}
+  {{- if .ingress.annotations }}
+  annotations:
+    {{- range $key, $value := .ingress.annotations }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+  {{- end }}
+spec:
+{{- if (and (not (eq .ingressVersion "extensions/v1beta1")) .ingress.ingressClassName) }}
+  ingressClassName: {{ .ingress.ingressClassName }}
 {{- end }}
+  rules:
+  - host: {{ $hostname }}
+    http:
+      paths:
+        - backend:
+          {{- if (not (eq .ingressVersion "networking.k8s.io/v1")) }}
+            serviceName: {{ .fullName }}-{{ .serviceName }}
+            servicePort: {{ $servicePort }}
+          {{- else }}
+            service:
+              name: {{ .fullName }}-{{ .serviceName }}
+              port:
+                number: {{ $servicePort }}
+            {{- end }}
+          {{- if $path }}
+          path: {{ $path }}
+          {{- if (not (eq .ingressVersion "extensions/v1beta1")) }}
+          pathType: ImplementationSpecific
+          {{- end }}
+          {{- end -}}
+  {{- if (hasKey .ingress "tls") }}
+  tls:
+  - hosts:
+    - {{ $hostname }}
+    secretName: {{ .ingress.tls }}
+  {{- end -}}
+{{- end -}}
 
 {{/*
-Create the KONG_ADMIN_GUI_LISTEN value string
+Create Service resource for a Kong service
 */}}
-{{- define "kong.kongManagerListenValue" -}}
+{{- define "kong.service" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .fullName }}-{{ .serviceName }}
+  namespace: {{ .namespace }}
+  {{- if .annotations }}
+  annotations:
+  {{- range $key, $value := .annotations }}
+    {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- end }}
+  labels:
+    {{- .metaLabels | nindent 4 }}
+  {{- range $key, $value := .labels }}
+    {{ $key }}: {{ $value | quote }}
+  {{- end }}
+spec:
+  type: {{ .type }}
+  {{- if eq .type "LoadBalancer" }}
+  {{- if .loadBalancerIP }}
+  loadBalancerIP: {{ .loadBalancerIP }}
+  {{- end }}
+  {{- if .loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+  {{- range $cidr := .loadBalancerSourceRanges }}
+  - {{ $cidr }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- if .externalIPs }}
+  externalIPs:
+  {{- range $ip := .externalIPs }}
+  - {{ $ip }}
+  {{- end -}}
+  {{- end }}
+  ports:
+  {{- if .http }}
+  {{- if .http.enabled }}
+  - name: kong-{{ .serviceName }}
+    port: {{ .http.servicePort }}
+    targetPort: {{ .http.containerPort }}
+  {{- if (and (or (eq .type "LoadBalancer") (eq .type "NodePort")) (not (empty .http.nodePort))) }}
+    nodePort: {{ .http.nodePort }}
+  {{- end }}
+    protocol: TCP
+  {{- end }}
+  {{- end }}
+  {{- if .tls.enabled }}
+  - name: kong-{{ .serviceName }}-tls
+    port: {{ .tls.servicePort }}
+    targetPort: {{ .tls.overrideServiceTargetPort | default .tls.containerPort }}
+  {{- if (and (or (eq .type "LoadBalancer") (eq .type "NodePort")) (not (empty .tls.nodePort))) }}
+    nodePort: {{ .tls.nodePort }}
+  {{- end }}
+    protocol: TCP
+  {{- end }}
+  {{- if (hasKey . "stream") }}
+  {{- range .stream }}
+  - name: stream{{ if (eq (default "TCP" .protocol) "UDP") }}udp{{ end }}-{{ .containerPort }}
+    port: {{ .servicePort }}
+    targetPort: {{ .containerPort }}
+    {{- if (and (or (eq $.type "LoadBalancer") (eq $.type "NodePort")) (not (empty .nodePort))) }}
+    nodePort: {{ .nodePort }}
+    {{- end }}
+    protocol: {{ .protocol | default "TCP" }}
+  {{- end }}
+  {{- end }}
+  {{- if .externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .externalTrafficPolicy }}
+  {{- end }}
+  {{- if .clusterIP }}
+  clusterIP: {{ .clusterIP }}
+  {{- end }}
+  selector:
+    {{- .selectorLabels | nindent 4 }}
+{{- end -}}
 
-{{- if and .Values.manager.http.enabled .Values.manager.tls.enabled -}}
-   0.0.0.0:{{ .Values.manager.http.containerPort }},0.0.0.0:{{ .Values.manager.tls.containerPort }} ssl
-{{- else -}}
-{{- if .Values.manager.http.enabled -}}
-   0.0.0.0:{{ .Values.manager.http.containerPort }}
-{{- end -}}
-{{- if .Values.manager.tls.enabled -}}
-   0.0.0.0:{{ .Values.manager.tls.containerPort }} ssl
-{{- end -}}
-{{- end -}}
-
-{{- end }}
 
 {{/*
-Create the KONG_PORTAL_GUI_LISTEN value string
+Create KONG_SERVICE_LISTEN strings
+Generic tool for creating KONG_PROXY_LISTEN, KONG_ADMIN_LISTEN, etc.
 */}}
-{{- define "kong.kongPortalListenValue" -}}
+{{- define "kong.listen" -}}
+  {{- $unifiedListen := list -}}
 
-{{- if and .Values.portal.http.enabled .Values.portal.tls.enabled -}}
-   0.0.0.0:{{ .Values.portal.http.containerPort }},0.0.0.0:{{ .Values.portal.tls.containerPort }} ssl
-{{- else -}}
-{{- if .Values.portal.http.enabled -}}
-   0.0.0.0:{{ .Values.portal.http.containerPort }}
-{{- end -}}
-{{- if .Values.portal.tls.enabled -}}
-   0.0.0.0:{{ .Values.portal.tls.containerPort }} ssl
-{{- end -}}
-{{- end -}}
+  {{/* Some services do not support these blocks at all, so these checks are a
+       two-stage "is it safe to evaluate this?" and then "should we evaluate
+       this?"
+  */}}
+  {{- if .http -}}
+    {{- if .http.enabled -}}
+      {{- $listenConfig := dict -}}
+      {{- $listenConfig := merge $listenConfig .http -}}
+      {{- $_ := set $listenConfig "address" (default "0.0.0.0" .address) -}}
+      {{- $httpListen := (include "kong.singleListen" $listenConfig) -}}
+      {{- $unifiedListen = append $unifiedListen $httpListen -}}
+    {{- end -}}
+  {{- end -}}
 
-{{- end }}
+  {{- if .tls -}}
+    {{- if .tls.enabled -}}
+      {{/*
+      This is a bit of a hack to support always including "ssl" in the parameter
+      list for TLS listens. It's not possible to set a variable to an object from
+      .Values and then modify one of the objects values locally, although
+      https://github.com/helm/helm/issues/4987 indicates it should be. Instead,
+      this creates a new object and new parameters list built from the original.
+      */}}
+      {{- $listenConfig := dict -}}
+      {{- $listenConfig := merge $listenConfig .tls -}}
+      {{- $parameters := append .tls.parameters "ssl" -}}
+      {{- $_ := set $listenConfig "parameters" $parameters -}}
+      {{- $_ := set $listenConfig "address" (default "0.0.0.0" .address) -}}
+      {{- $tlsListen := (include "kong.singleListen" $listenConfig) -}}
+      {{- $unifiedListen = append $unifiedListen $tlsListen -}}
+    {{- end -}}
+  {{- end -}}
+
+  {{- $listenString := ($unifiedListen | join ", ") -}}
+  {{- if eq (len $listenString) 0 -}}
+    {{- $listenString = "off" -}}
+  {{- end -}}
+  {{- $listenString -}}
+{{- end -}}
 
 {{/*
-Create the KONG_PORTAL_API_LISTEN value string
+Create KONG_PORT_MAPS string
+Parameters: takes a service (e.g. .Values.proxy) as its argument and returns KONG_PORT_MAPS for that service.
 */}}
-{{- define "kong.kongPortalApiListenValue" -}}
+{{- define "kong.port_maps" -}}
+  {{- $portMaps := list -}}
 
-{{- if and .Values.portalapi.http.enabled .Values.portalapi.tls.enabled -}}
-   0.0.0.0:{{ .Values.portalapi.http.containerPort }},0.0.0.0:{{ .Values.portalapi.tls.containerPort }} ssl
-{{- else -}}
-{{- if .Values.portalapi.http.enabled -}}
-   0.0.0.0:{{ .Values.portalapi.http.containerPort }}
-{{- end -}}
-{{- if .Values.portalapi.tls.enabled -}}
-   0.0.0.0:{{ .Values.portalapi.tls.containerPort }} ssl
-{{- end -}}
+  {{- if .http.enabled -}}
+		{{- $portMaps = append $portMaps (printf "%d:%d" (int64 .http.servicePort) (int64 .http.containerPort)) -}}
+  {{- end -}}
+
+  {{- if .tls.enabled -}}
+		{{- $portMaps = append $portMaps (printf "%d:%d" (int64 .tls.servicePort) (int64 .tls.containerPort)) -}}
+  {{- end -}}
+
+  {{- $portMapsString := ($portMaps | join ", ") -}}
+  {{- $portMapsString -}}
 {{- end -}}
 
-{{- end }}
+{{/*
+Create KONG_STREAM_LISTEN string
+*/}}
+{{- define "kong.streamListen" -}}
+  {{- $unifiedListen := list -}}
+  {{- range .stream -}}
+    {{- $listenConfig := dict -}}
+    {{- $listenConfig := merge $listenConfig . -}}
+    {{- $_ := set $listenConfig "address" "0.0.0.0" -}}
+    {{/* You set NGINX stream listens to UDP using a parameter due to historical reasons.
+         Our configuration is dual-purpose, for both the Service and listen string, so we
+         forcibly inject this parameter if that's the Service protocol. The default handles
+         configs that predate the addition of the protocol field, where we only supported TCP. */}}
+    {{- if (eq (default "TCP" .protocol) "UDP") -}}
+      {{- $_ := set $listenConfig "parameters" (append (default (list) .parameters) "udp") -}}
+    {{- end -}}
+    {{- $unifiedListen = append $unifiedListen (include "kong.singleListen" $listenConfig ) -}}
+  {{- end -}}
+
+  {{- $listenString := ($unifiedListen | join ", ") -}}
+  {{- if eq (len $listenString) 0 -}}
+    {{- $listenString = "" -}}
+  {{- end -}}
+  {{- $listenString -}}
+{{- end -}}
+
+{{/*
+Create a single listen (IP+port+parameter combo)
+*/}}
+{{- define "kong.singleListen" -}}
+  {{- $listen := list -}}
+  {{- $listen = append $listen (printf "%s:%d" .address (int64 .containerPort)) -}}
+  {{- range $param := .parameters | default (list) | uniq }}
+    {{- $listen = append $listen $param -}}
+  {{- end -}}
+  {{- $listen | join " " -}}
+{{- end -}}
+
+{{/*
+Return the local admin API URL, preferring HTTPS if available
+*/}}
+{{- define "kong.adminLocalURL" -}}
+  {{- if .Values.admin.tls.enabled -}}
+https://localhost:{{ .Values.admin.tls.containerPort }}
+  {{- else if .Values.admin.http.enabled -}}
+http://localhost:{{ .Values.admin.http.containerPort }}
+  {{- else -}}
+http://localhost:9999 # You have no admin listens! The controller will not work unless you set .Values.admin.http.enabled=true or .Values.admin.tls.enabled=true!
+  {{- end -}}
+{{- end -}}
 
 {{/*
 Create the ingress servicePort value string
@@ -159,28 +345,49 @@ The name of the service used for the ingress controller's validation webhook
 {{ include "kong.fullname" . }}-validation-webhook
 {{- end -}}
 
-{{- define "kong.env" -}}
-{{- range $key, $val := .Values.env }}
-- name: KONG_{{ $key | upper}}
-{{- $valueType := printf "%T" $val -}}
-{{ if eq $valueType "map[string]interface {}" }}
-{{ toYaml $val | indent 2 -}}
-{{- else }}
-  value: {{ $val | quote -}}
-{{- end -}}
-{{- end -}}
+{{- define "kong.ingressController.env" -}}
+{{/*
+    ====== AUTO-GENERATED ENVIRONMENT VARIABLES ======
+*/}}
+
+{{- $autoEnv := dict -}}
+{{- $_ := set $autoEnv "CONTROLLER_KONG_ADMIN_TLS_SKIP_VERIFY" true -}}
+{{- $_ := set $autoEnv "CONTROLLER_PUBLISH_SERVICE" (printf "%s/%s-proxy" ( include "kong.namespace" . ) (include "kong.fullname" .)) -}}
+{{- $_ := set $autoEnv "CONTROLLER_INGRESS_CLASS" .Values.ingressController.ingressClass -}}
+{{- $_ := set $autoEnv "CONTROLLER_ELECTION_ID" (printf "kong-ingress-controller-leader-%s" .Values.ingressController.ingressClass) -}}
+{{- $_ := set $autoEnv "CONTROLLER_KONG_ADMIN_URL" (include "kong.adminLocalURL" .) -}}
+{{- if .Values.ingressController.admissionWebhook.enabled }}
+  {{- $_ := set $autoEnv "CONTROLLER_ADMISSION_WEBHOOK_LISTEN" (printf "0.0.0.0:%d" (int64 .Values.ingressController.admissionWebhook.port)) -}}
+{{- end }}
+{{- if (not (eq (len .Values.ingressController.watchNamespaces) 0)) }}
+  {{- $_ := set $autoEnv "CONTROLLER_WATCH_NAMESPACE" (.Values.ingressController.watchNamespaces | join ",") -}}
+  {{- $_ := set $autoEnv "CONTROLLER_ENABLE_CONTROLLER_KONGCLUSTERPLUGIN" false -}}
+{{- end }}
+
+{{/*
+    ====== USER-SET ENVIRONMENT VARIABLES ======
+*/}}
+
+{{- $userEnv := dict -}}
+{{- range $key, $val := .Values.ingressController.env }}
+  {{- $upper := upper $key -}}
+  {{- $var := printf "CONTROLLER_%s" $upper -}}
+  {{- $_ := set $userEnv $var $val -}}
 {{- end -}}
 
-{{- define "kong.ingressController.env" -}}
-{{- range $key, $val := .Values.ingressController.env }}
-- name: CONTROLLER_{{ $key | upper}}
-{{- $valueType := printf "%T" $val -}}
-{{ if eq $valueType "map[string]interface {}" }}
-{{ toYaml $val | indent 2 -}}
-{{- else }}
-  value: {{ $val | quote -}}
+{{/*
+      ====== MERGE AND RENDER ENV BLOCK ======
+*/}}
+
+{{- $completeEnv := mergeOverwrite $autoEnv $userEnv -}}
+{{- template "kong.renderEnv" $completeEnv -}}
+
 {{- end -}}
-{{- end -}}
+
+{{- define "kong.userDefinedVolumes" -}}
+{{- if .Values.deployment.userDefinedVolumes }}
+{{- toYaml .Values.deployment.userDefinedVolumes }}
+{{- end }}
 {{- end -}}
 
 {{- define "kong.volumes" -}}
@@ -188,19 +395,32 @@ The name of the service used for the ingress controller's validation webhook
   emptyDir: {}
 - name: {{ template "kong.fullname" . }}-tmp
   emptyDir: {}
+{{- if (and (.Values.postgresql.enabled) .Values.waitImage.enabled) }}
+- name: {{ template "kong.fullname" . }}-bash-wait-for-postgres
+  configMap:
+    name: {{ template "kong.fullname" . }}-bash-wait-for-postgres
+    defaultMode: 0755
+{{- end }}
 {{- range .Values.plugins.configMaps }}
 - name: kong-plugin-{{ .pluginName }}
   configMap:
     name: {{ .name }}
+{{- range .subdirectories }}
+- name: {{ .name }}
+  configMap:
+    name: {{ .name }}
+{{- end }}
 {{- end }}
 {{- range .Values.plugins.secrets }}
 - name: kong-plugin-{{ .pluginName }}
   secret:
     secretName: {{ .name }}
+{{- range .subdirectories }}
+- name: {{ .name }}
+  secret:
+    secretName: {{ .name }}
 {{- end }}
-- name: custom-nginx-template-volume
-  configMap:
-    name: {{ template "kong.fullname" . }}-default-custom-server-blocks
+{{- end }}
 {{- if (and (not .Values.ingressController.enabled) (eq .Values.env.database "off")) }}
 - name: kong-custom-dbless-config-volume
   configMap:
@@ -213,12 +433,32 @@ The name of the service used for the ingress controller's validation webhook
 {{- if .Values.ingressController.admissionWebhook.enabled }}
 - name: webhook-cert
   secret:
+    {{- if .Values.ingressController.admissionWebhook.certificate.provided }}
+    secretName: {{ .Values.ingressController.admissionWebhook.certificate.secretName }}
+    {{- else }}
     secretName: {{ template "kong.fullname" . }}-validation-webhook-keypair
+    {{- end }}  
 {{- end }}
 {{- range $secretVolume := .Values.secretVolumes }}
 - name: {{ . }}
   secret:
     secretName: {{ . }}
+{{- end }}
+{{- range .Values.extraConfigMaps }}
+- name: {{ .name }}
+  configMap:
+    name: {{ .name }}
+{{- end }}
+{{- range .Values.extraSecrets }}
+- name: {{ .name }}
+  secret:
+    secretName: {{ .name }}
+{{- end }}
+{{- end -}}
+
+{{- define "kong.userDefinedVolumeMounts" -}}
+{{- if .Values.deployment.userDefinedVolumeMounts }}
+{{- toYaml .Values.deployment.userDefinedVolumeMounts }}
 {{- end }}
 {{- end -}}
 
@@ -227,8 +467,6 @@ The name of the service used for the ingress controller's validation webhook
   mountPath: /kong_prefix/
 - name: {{ template "kong.fullname" . }}-tmp
   mountPath: /tmp
-- name: custom-nginx-template-volume
-  mountPath: /kong
 {{- if (and (not .Values.ingressController.enabled) (eq .Values.env.database "off")) }}
 - name: kong-custom-dbless-config-volume
   mountPath: /kong_dbless/
@@ -238,15 +476,45 @@ The name of the service used for the ingress controller's validation webhook
   mountPath: /etc/secrets/{{ . }}
 {{- end }}
 {{- range .Values.plugins.configMaps }}
+{{- $mountPath := printf "/opt/kong/plugins/%s" .pluginName }}
 - name:  kong-plugin-{{ .pluginName }}
-  mountPath: /opt/kong/plugins/{{ .pluginName }}
+  mountPath: {{ $mountPath }}
   readOnly: true
+{{- range .subdirectories }}
+- name: {{ .name  }}
+  mountPath: {{ printf "%s/%s" $mountPath ( .path | default .name ) }}
+  readOnly: true
+{{- end }}
 {{- end }}
 {{- range .Values.plugins.secrets }}
+{{- $mountPath := printf "/opt/kong/plugins/%s" .pluginName }}
 - name:  kong-plugin-{{ .pluginName }}
-  mountPath: /opt/kong/plugins/{{ .pluginName }}
+  mountPath: {{ $mountPath }}
+  readOnly: true
+{{- range .subdirectories }}
+- name: {{ .name }}
+  mountPath: {{ printf "%s/%s" $mountPath .path }}
   readOnly: true
 {{- end }}
+{{- end }}
+
+{{- range .Values.extraConfigMaps }}
+- name:  {{ .name }}
+  mountPath: {{ .mountPath }}
+
+  {{- if .subPath }}
+  subPath: {{ .subPath }}
+  {{- end }}
+{{- end }}
+{{- range .Values.extraSecrets }}
+- name:  {{ .name }}
+  mountPath: {{ .mountPath }}
+
+  {{- if .subPath }}
+  subPath: {{ .subPath }}
+  {{- end }}
+{{- end }}
+
 {{- end -}}
 
 {{- define "kong.plugins" -}}
@@ -262,51 +530,51 @@ The name of the service used for the ingress controller's validation webhook
 
 {{- define "kong.wait-for-db" -}}
 - name: wait-for-db
-  image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+  image: {{ include "kong.getRepoTag" .Values.image }}
   imagePullPolicy: {{ .Values.image.pullPolicy }}
+  securityContext:
+  {{ toYaml .Values.containerSecurityContext | nindent 4 }} 
   env:
-  {{- if .Values.enterprise.enabled }}
-  {{- include "kong.license" . | nindent 2 }}
-  {{- end }}
-  {{- if .Values.postgresql.enabled }}
-  - name: KONG_PG_HOST
-    value: {{ template "kong.postgresql.fullname" . }}
-  - name: KONG_PG_PORT
-    value: "{{ .Values.postgresql.service.port }}"
-  - name: KONG_PG_PASSWORD
-    valueFrom:
-      secretKeyRef:
-        name: {{ template "kong.postgresql.fullname" . }}
-        key: postgresql-password
-  {{- end }}
-  - name: KONG_LUA_PACKAGE_PATH
-    value: "/opt/?.lua;;"
-  - name: KONG_PLUGINS
-    value: {{ template "kong.plugins" . }}
-  {{- include "kong.env" .  | nindent 2 }}
-  command: [ "/bin/sh", "-c", "until kong start; do echo 'waiting for db'; sleep 1; done; kong stop" ]
+  {{- include "kong.env" . | nindent 2 }}
+{{/* TODO the prefix override is to work around https://github.com/Kong/charts/issues/295
+     Note that we use args instead of command here to /not/ override the standard image entrypoint. */}}
+  args: [ "/bin/sh", "-c", "export KONG_NGINX_DAEMON=on; export KONG_PREFIX=`mktemp -d`; until kong start; do echo 'waiting for db'; sleep 1; done; kong stop"]
   volumeMounts:
   {{- include "kong.volumeMounts" . | nindent 4 }}
+  {{- include "kong.userDefinedVolumeMounts" . | nindent 4 }}
+  resources:
+  {{- toYaml .Values.resources | nindent 4 }}
+{{- end -}}
+
+{{/* effectiveVersion takes an image dict from values.yaml. if .effectiveSemver is set, it returns that, else it returns .tag */}}
+{{- define "kong.effectiveVersion" -}}
+{{- if .effectiveSemver -}}
+{{- .effectiveSemver -}}
+{{- else -}}
+{{- .tag -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "kong.controller-container" -}}
 - name: ingress-controller
+  securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 4 }}  
   args:
-  - /kong-ingress-controller
-  # Service from were we extract the IP address/es to use in Ingress status
-  - --publish-service={{ .Release.Namespace }}/{{ template "kong.fullname" . }}-proxy
-  # Set the ingress class
-  - --ingress-class={{ .Values.ingressController.ingressClass }}
-  - --election-id=kong-ingress-controller-leader-{{ .Values.ingressController.ingressClass }}
-  # the kong URL points to the kong admin api server
-  {{- if .Values.admin.useTLS }}
-  - --kong-url=https://localhost:{{ .Values.admin.containerPort }}
-  - --admin-tls-skip-verify # TODO make this configurable
-  {{- else }}
-  - --kong-url=http://localhost:{{ .Values.admin.containerPort }}
+  {{ if .Values.ingressController.args}}
+  {{- range $val := .Values.ingressController.args }}
+  - {{ $val }}
   {{- end }}
+  {{- end }}
+  ports:
   {{- if .Values.ingressController.admissionWebhook.enabled }}
-  - --admission-webhook-listen=0.0.0.0:{{ .Values.ingressController.admissionWebhook.port }}
+  - name: webhook
+    containerPort: {{ .Values.ingressController.admissionWebhook.port }}
+    protocol: TCP
+  {{- end }}
+  {{ if (semverCompare ">= 2.0.0" (include "kong.effectiveVersion" .Values.ingressController.image)) -}}
+  - name: cmetrics
+    containerPort: 10255
+    protocol: TCP
   {{- end }}
   env:
   - name: POD_NAME
@@ -320,12 +588,19 @@ The name of the service used for the ingress controller's validation webhook
         apiVersion: v1
         fieldPath: metadata.namespace
 {{- include "kong.ingressController.env" .  | indent 2 }}
-  image: "{{ .Values.ingressController.image.repository }}:{{ .Values.ingressController.image.tag }}"
+  image: {{ include "kong.getRepoTag" .Values.ingressController.image }}
   imagePullPolicy: {{ .Values.image.pullPolicy }}
+{{/* disableReadiness is a hidden setting to drop this block entirely for use with a debugger
+     Helm value interpretation doesn't let you replace the default HTTP checks with any other
+	 check type, and all HTTP checks freeze when a debugger pauses operation.
+	 Setting disableReadiness to ANY value disables the probes.
+*/}}
+{{- if (not (hasKey .Values.ingressController "disableProbes")) }}
   readinessProbe:
 {{ toYaml .Values.ingressController.readinessProbe | indent 4 }}
   livenessProbe:
 {{ toYaml .Values.ingressController.livenessProbe | indent 4 }}
+{{- end }}
   resources:
 {{ toYaml .Values.ingressController.resources | indent 4 }}
 {{- if .Values.ingressController.admissionWebhook.enabled }}
@@ -336,15 +611,11 @@ The name of the service used for the ingress controller's validation webhook
 {{- end }}
 {{- end -}}
 
-{{/*
-Retrieve Kong Enterprise license from a secret and make it available in env vars
-*/}}
-{{- define "kong.license" -}}
-- name: KONG_LICENSE_DATA
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.enterprise.license_secret }}
-      key: license
+{{- define "secretkeyref" -}}
+valueFrom:
+  secretKeyRef:
+    name: {{ .name }}
+    key: {{ .key }}
 {{- end -}}
 
 {{/*
@@ -354,156 +625,526 @@ Use the Pod security context defined in Values or set the UID by default
 {{ .Values.securityContext | toYaml }}
 {{- end -}}
 
+{{- define "kong.no_daemon_env" -}}
+{{- template "kong.env" . }}
+- name: KONG_NGINX_DAEMON
+  value: "off"
+{{- end -}}
+
 {{/*
 The environment values passed to Kong; this should come after all
 the template that it itself is using form the above sections.
 */}}
-{{- define "kong.final_env" -}}
-- name: KONG_LUA_PACKAGE_PATH
-  value: "/opt/?.lua;;"
-{{- if not .Values.env.admin_listen }}
-{{- if .Values.admin.useTLS }}
-- name: KONG_ADMIN_LISTEN
-  value: "0.0.0.0:{{ .Values.admin.containerPort }} ssl"
-{{- else }}
-- name: KONG_ADMIN_LISTEN
-  value: 0.0.0.0:{{ .Values.admin.containerPort }}
-{{- end }}
-{{- end }}
+{{- define "kong.env" -}}
+{{/*
+    ====== AUTO-GENERATED ENVIRONMENT VARIABLES ======
+*/}}
+{{- $autoEnv := dict -}}
+
+{{- $_ := set $autoEnv "KONG_LUA_PACKAGE_PATH" "/opt/?.lua;/opt/?/init.lua;;" -}}
+
+{{- if .Values.ingressController.enabled -}}
+  {{- $_ := set $autoEnv "KONG_KIC" "on" -}}
+{{- end -}}
+
+{{- with .Values.admin -}}
+  {{- $address := "0.0.0.0" -}}
+  {{- if (not .enabled) -}}
+    {{- $address = "127.0.0.1" -}}
+  {{- end -}}
+  {{- $listenConfig := dict -}}
+  {{- $listenConfig := merge $listenConfig . -}}
+  {{- $_ := set $listenConfig "address" $address -}}
+  {{- $_ := set $autoEnv "KONG_ADMIN_LISTEN" (include "kong.listen" $listenConfig) -}}
+{{- end -}}
+
 {{- if .Values.admin.ingress.enabled }}
-- name: KONG_ADMIN_API_URI
-  value: {{ include "kong.ingress.serviceUrl" .Values.admin.ingress }}
-{{- end }}
-{{- if not .Values.env.proxy_listen }}
-- name: KONG_PROXY_LISTEN
-  value: {{ template "kong.kongProxyListenValue" . }}
-{{- end }}
-{{- if and (not .Values.env.admin_gui_listen) (.Values.enterprise.enabled) }}
-- name: KONG_ADMIN_GUI_LISTEN
-  value: {{ template "kong.kongManagerListenValue" . }}
-{{- end }}
-{{- if and (.Values.manager.ingress.enabled) (.Values.enterprise.enabled) }}
-- name: KONG_ADMIN_GUI_URL
-  value: {{ include "kong.ingress.serviceUrl" .Values.manager.ingress }}
-{{- end }}
-{{- if and (not .Values.env.portal_gui_listen) (.Values.enterprise.enabled) (.Values.enterprise.portal.enabled) }}
-- name: KONG_PORTAL_GUI_LISTEN
-  value: {{ template "kong.kongPortalListenValue" . }}
-{{- end }}
-{{- if and (.Values.portal.ingress.enabled) (.Values.enterprise.enabled) (.Values.enterprise.portal.enabled) }}
-- name: KONG_PORTAL_GUI_HOST
-  value: {{ .Values.portal.ingress.hostname }}
-{{- if .Values.portal.ingress.tls }}
-- name: KONG_PORTAL_GUI_PROTOCOL
-  value: https
-{{- else }}
-- name: KONG_PORTAL_GUI_PROTOCOL
-  value: http
-{{- end }}
-{{- end }}
-{{- if and (not .Values.env.portal_api_listen) (.Values.enterprise.enabled) (.Values.enterprise.portal.enabled) }}
-- name: KONG_PORTAL_API_LISTEN
-  value: {{ template "kong.kongPortalApiListenValue" . }}
-{{- end }}
-{{- if and (.Values.portalapi.ingress.enabled) (.Values.enterprise.enabled) (.Values.enterprise.portal.enabled) }}
-- name: KONG_PORTAL_API_URL
-  value: {{ include "kong.ingress.serviceUrl" .Values.portalapi.ingress }}
-{{- end }}
-- name: KONG_NGINX_DAEMON
-  value: "off"
+  {{- $_ := set $autoEnv "KONG_ADMIN_API_URI" (include "kong.ingress.serviceUrl" .Values.admin.ingress) -}}
+{{- end -}}
+
+{{- $_ := set $autoEnv "KONG_PROXY_LISTEN" (include "kong.listen" .Values.proxy) -}}
+
+{{- $streamStrings := list -}}
+{{- if .Values.proxy.enabled -}}
+  {{- $tcpStreamString := (include "kong.streamListen" .Values.proxy) -}}
+  {{- if (not (eq $tcpStreamString "")) -}}
+    {{- $streamStrings = (append $streamStrings $tcpStreamString) -}}
+  {{- end -}}
+{{- end -}}
+{{- if .Values.udpProxy.enabled -}}
+  {{- $udpStreamString := (include "kong.streamListen" .Values.udpProxy) -}}
+  {{- if (not (eq $udpStreamString "")) -}}
+    {{- $streamStrings = (append $streamStrings $udpStreamString) -}}
+  {{- end -}}
+{{- end -}}
+{{- $streamString := $streamStrings | join ", " -}}
+{{- if (eq (len $streamString) 0)  -}}
+  {{- $streamString = "off" -}}
+{{- end -}}
+{{- $_ := set $autoEnv "KONG_STREAM_LISTEN" $streamString -}}
+
+{{- $_ := set $autoEnv "KONG_STATUS_LISTEN" (include "kong.listen" .Values.status) -}}
+
+{{- if .Values.proxy.enabled -}}
+  {{- $_ := set $autoEnv "KONG_PORT_MAPS" (include "kong.port_maps" .Values.proxy) -}}
+{{- end -}}
+
+{{- $_ := set $autoEnv "KONG_CLUSTER_LISTEN" (include "kong.listen" .Values.cluster) -}}
+
 {{- if .Values.enterprise.enabled }}
-{{- if not .Values.enterprise.vitals.enabled }}
-- name: KONG_VITALS
-  value: "off"
+  {{- $_ := set $autoEnv "KONG_ADMIN_GUI_LISTEN" (include "kong.listen" .Values.manager) -}}
+  {{- if .Values.manager.ingress.enabled }}
+    {{- $_ := set $autoEnv "KONG_ADMIN_GUI_URL" (include "kong.ingress.serviceUrl" .Values.manager.ingress) -}}
+  {{- end -}}
+
+  {{- if not .Values.enterprise.vitals.enabled }}
+    {{- $_ := set $autoEnv "KONG_VITALS" "off" -}}
+  {{- end }}
+  {{- $_ := set $autoEnv "KONG_CLUSTER_TELEMETRY_LISTEN" (include "kong.listen" .Values.clustertelemetry) -}}
+
+  {{- if .Values.enterprise.portal.enabled }}
+    {{- $_ := set $autoEnv "KONG_PORTAL" "on" -}}
+      {{- $_ := set $autoEnv "KONG_PORTAL_GUI_LISTEN" (include "kong.listen" .Values.portal) -}}
+    {{- $_ := set $autoEnv "KONG_PORTAL_API_LISTEN" (include "kong.listen" .Values.portalapi) -}}
+
+    {{- if .Values.portal.ingress.enabled }}
+      {{- $_ := set $autoEnv "KONG_PORTAL_GUI_HOST" .Values.portal.ingress.hostname -}}
+      {{- if .Values.portal.ingress.tls }}
+        {{- $_ := set $autoEnv "KONG_PORTAL_GUI_PROTOCOL" "https" -}}
+      {{- else }}
+        {{- $_ := set $autoEnv "KONG_PORTAL_GUI_PROTOCOL" "http" -}}
+      {{- end }}
+    {{- end }}
+
+    {{- if .Values.portalapi.ingress.enabled }}
+      {{- $_ := set $autoEnv "KONG_PORTAL_API_URL" (include "kong.ingress.serviceUrl" .Values.portalapi.ingress) -}}
+    {{- end }}
+  {{- end }}
+
+  {{- if .Values.enterprise.rbac.enabled }}
+    {{- $_ := set $autoEnv "KONG_ENFORCE_RBAC" "on" -}}
+    {{- $_ := set $autoEnv "KONG_ADMIN_GUI_AUTH" .Values.enterprise.rbac.admin_gui_auth | default "basic-auth" -}}
+
+    {{- if not (eq .Values.enterprise.rbac.admin_gui_auth "basic-auth") }}
+      {{- $guiAuthConf := include "secretkeyref" (dict "name" .Values.enterprise.rbac.admin_gui_auth_conf_secret "key" "admin_gui_auth_conf") -}}
+      {{- $_ := set $autoEnv "KONG_ADMIN_GUI_AUTH_CONF" $guiAuthConf -}}
+    {{- end }}
+
+    {{- $guiSessionConf := include "secretkeyref" (dict "name" .Values.enterprise.rbac.session_conf_secret "key" "admin_gui_session_conf") -}}
+    {{- $_ := set $autoEnv "KONG_ADMIN_GUI_SESSION_CONF" $guiSessionConf -}}
+  {{- end }}
+
+  {{- if .Values.enterprise.smtp.enabled }}
+    {{- $_ := set $autoEnv "KONG_SMTP_MOCK" "off" -}}
+    {{- $_ := set $autoEnv "KONG_PORTAL_EMAILS_FROM" .Values.enterprise.smtp.portal_emails_from -}}
+    {{- $_ := set $autoEnv "KONG_PORTAL_EMAILS_REPLY_TO" .Values.enterprise.smtp.portal_emails_reply_to -}}
+    {{- $_ := set $autoEnv "KONG_ADMIN_EMAILS_FROM" .Values.enterprise.smtp.admin_emails_from -}}
+    {{- $_ := set $autoEnv "KONG_ADMIN_EMAILS_REPLY_TO" .Values.enterprise.smtp.admin_emails_reply_to -}}
+    {{- $_ := set $autoEnv "KONG_SMTP_ADMIN_EMAILS" .Values.enterprise.smtp.smtp_admin_emails -}}
+    {{- $_ := set $autoEnv "KONG_SMTP_HOST" .Values.enterprise.smtp.smtp_host -}}
+    {{- $_ := set $autoEnv "KONG_SMTP_AUTH_TYPE" .Values.enterprise.smtp.smtp_auth_type -}}
+    {{- $_ := set $autoEnv "KONG_SMTP_SSL" .Values.enterprise.smtp.smtp_ssl -}}
+    {{- $_ := set $autoEnv "KONG_SMTP_PORT" .Values.enterprise.smtp.smtp_port -}}
+    {{- $_ := set $autoEnv "KONG_SMTP_STARTTLS" (quote .Values.enterprise.smtp.smtp_starttls) -}}
+    {{- if .Values.enterprise.smtp.auth.smtp_username }}
+      {{- $_ := set $autoEnv "KONG_SMTP_USERNAME" .Values.enterprise.smtp.auth.smtp_username -}}
+      {{- $smtpPassword := include "secretkeyref" (dict "name" .Values.enterprise.smtp.auth.smtp_password_secret "key" "smtp_password") -}}
+      {{- $_ := set $autoEnv "KONG_SMTP_PASSWORD" $smtpPassword -}}
+    {{- end }}
+  {{- else }}
+    {{- $_ := set $autoEnv "KONG_SMTP_MOCK" "on" -}}
+  {{- end }}
+
+  {{- if .Values.enterprise.license_secret -}}
+    {{- $lic := include "secretkeyref" (dict "name" .Values.enterprise.license_secret "key" "license") -}}
+    {{- $_ := set $autoEnv "KONG_LICENSE_DATA" $lic -}}
+  {{- end }}
+
+{{- end }} {{/* End of the Enterprise settings block */}}
+
+{{- if .Values.postgresql.enabled }}
+  {{- $_ := set $autoEnv "KONG_PG_HOST" (include "kong.postgresql.fullname" .) -}}
+  {{- $_ := set $autoEnv "KONG_PG_PORT" .Values.postgresql.service.port -}}
+  {{- $pgPassword := include "secretkeyref" (dict "name" (include "kong.postgresql.fullname" .) "key" "postgresql-password") -}}
+  {{- $_ := set $autoEnv "KONG_PG_PASSWORD" $pgPassword -}}
+{{- else if .Values.postgresql.enabled }}
+  {{- $_ := set $autoEnv "KONG_PG_PORT" "5432" }}
 {{- end }}
-{{- if .Values.enterprise.portal.enabled }}
-- name: KONG_PORTAL
-  value: "on"
-{{- if .Values.enterprise.portal.portal_auth }}
-- name: KONG_PORTAL_AUTH
-  value: {{ .Values.enterprise.portal.portal_auth }}
-- name: KONG_PORTAL_SESSION_CONF
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.enterprise.portal.session_conf_secret }}
-      key: portal_session_conf
+
+{{- if (and (not .Values.ingressController.enabled) (eq .Values.env.database "off")) }}
+  {{- $_ := set $autoEnv "KONG_DECLARATIVE_CONFIG" "/kong_dbless/kong.yml" -}}
 {{- end }}
-{{- end }}
-{{- if .Values.enterprise.rbac.enabled }}
-- name: KONG_ENFORCE_RBAC
-  value: "on"
-- name: KONG_ADMIN_GUI_AUTH
-  value: {{ .Values.enterprise.rbac.admin_gui_auth | default "basic-auth" }}
-{{- if not (eq .Values.enterprise.rbac.admin_gui_auth "basic-auth") }}
-- name: KONG_ADMIN_GUI_AUTH_CONF
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.enterprise.rbac.admin_gui_auth_conf_secret }}
-      key: admin_gui_auth_conf
-{{- end }}
-- name: KONG_ADMIN_GUI_SESSION_CONF
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.enterprise.rbac.session_conf_secret }}
-      key: admin_gui_session_conf
-{{- end }}
-{{- if .Values.enterprise.smtp.enabled }}
-- name: KONG_PORTAL_EMAILS_FROM
-  value: {{ .Values.enterprise.smtp.portal_emails_from }}
-- name: KONG_PORTAL_EMAILS_REPLY_TO
-  value: {{ .Values.enterprise.smtp.portal_emails_reply_to }}
-- name: KONG_ADMIN_EMAILS_FROM
-  value: {{ .Values.enterprise.smtp.admin_emails_from }}
-- name: KONG_ADMIN_EMAILS_REPLY_TO
-  value: {{ .Values.enterprise.smtp.admin_emails_reply_to }}
-- name: KONG_SMTP_HOST
-  value: {{ .Values.enterprise.smtp.smtp_host }}
-- name: KONG_SMTP_PORT
-  value: {{ .Values.enterprise.smtp.smtp_port | quote }}
-- name: KONG_SMTP_STARTTLS
-  value: {{ .Values.enterprise.smtp.smtp_starttls | quote }}
-{{- if .Values.enterprise.smtp.auth.smtp_username }}
-- name: KONG_SMTP_USERNAME
-  value: {{ .Values.enterprise.smtp.auth.smtp_username }}
-- name: KONG_SMTP_PASSWORD
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.enterprise.smtp.auth.smtp_password_secret }}
-      key: smtp_password
+
+{{- $_ := set $autoEnv "KONG_PLUGINS" (include "kong.plugins" .) -}}
+
+{{/*
+    ====== USER-SET ENVIRONMENT VARIABLES ======
+*/}}
+
+{{- $userEnv := dict -}}
+{{- range $key, $val := .Values.env }}
+  {{- $upper := upper $key -}}
+  {{- $var := printf "KONG_%s" $upper -}}
+  {{- $_ := set $userEnv $var $val -}}
+{{- end -}}
+
+{{/*
+    ====== CUSTOM-SET ENVIRONMENT VARIABLES ======
+*/}}
+
+{{- $customEnv := dict -}}
+{{- range $key, $val := .Values.customEnv }}
+  {{- $upper := upper $key -}}
+  {{- $_ := set $customEnv $upper $val -}}
+{{- end -}}
+
+{{/*
+      ====== MERGE AND RENDER ENV BLOCK ======
+*/}}
+
+{{- $completeEnv := mergeOverwrite $autoEnv $userEnv $customEnv -}}
+{{- template "kong.renderEnv" $completeEnv -}}
+
+{{- end -}}
+
+{{/*
+Given a dictionary of variable=value pairs, render a container env block.
+Environment variables are sorted alphabetically
+*/}}
+{{- define "kong.renderEnv" -}}
+
+{{- $dict := . -}}
+
+{{- range keys . | sortAlpha }}
+{{- $val := pluck . $dict | first -}}
+{{- $valueType := printf "%T" $val -}}
+{{ if eq $valueType "map[string]interface {}" }}
+- name: {{ . }}
+{{ toYaml $val | indent 2 -}}
+{{- else if eq $valueType "string" }}
+{{- if regexMatch "valueFrom" $val }}
+- name: {{ . }}
+{{ $val | indent 2 }}
+{{- else }}
+- name: {{ . }}
+  value: {{ $val | quote }}
 {{- end }}
 {{- else }}
-- name: KONG_SMTP_MOCK
-  value: "on"
+- name: {{ . }}
+  value: {{ $val | quote }}
 {{- end }}
-{{ include "kong.license" . }}
-{{- end }}
-- name: KONG_NGINX_HTTP_INCLUDE
-  value: /kong/servers.conf
-{{- if .Values.postgresql.enabled }}
-- name: KONG_PG_HOST
-  value: {{ template "kong.postgresql.fullname" . }}
-- name: KONG_PG_PORT
-  value: "{{ .Values.postgresql.service.port }}"
-- name: KONG_PG_PASSWORD
-  valueFrom:
-    secretKeyRef:
-      name: {{ template "kong.postgresql.fullname" . }}
-      key: postgresql-password
-{{- end }}
-{{- if (and (not .Values.ingressController.enabled) (eq .Values.env.database "off")) }}
-- name: KONG_DECLARATIVE_CONFIG
-  value: "/kong_dbless/kong.yml"
-{{- end }}
-- name: KONG_PLUGINS
-  value: {{ template "kong.plugins" . }}
-{{- include "kong.env" . }}
+{{- end -}}
+
 {{- end -}}
 
 {{- define "kong.wait-for-postgres" -}}
 - name: wait-for-postgres
-  image: "{{ .Values.waitImage.repository }}:{{ .Values.waitImage.tag }}"
+{{- if (or .Values.waitImage.unifiedRepoTag .Values.waitImage.repository) }}
+  image: {{ include "kong.getRepoTag" .Values.waitImage }}
+{{- else }} {{/* default to the Kong image */}}
+  image: {{ include "kong.getRepoTag" .Values.image }}
+{{- end }}
   imagePullPolicy: {{ .Values.waitImage.pullPolicy }}
   env:
-  {{- include "kong.final_env" . | nindent 2 }}
-  command: [ "/bin/sh", "-c", "until nc -zv $KONG_PG_HOST $KONG_PG_PORT -w1; do echo 'waiting for db'; sleep 1; done" ]
+  {{- include "kong.no_daemon_env" . | nindent 2 }}
+  command: [ "bash", "/wait_postgres/wait.sh" ]
+  volumeMounts:
+  - name: {{ template "kong.fullname" . }}-bash-wait-for-postgres
+    mountPath: /wait_postgres
+  resources:
+  {{- toYaml .Values.migrations.resources | nindent 4 }}
+{{- end -}}
+
+{{- define "kong.deprecation-warnings" -}}
+  {{- $warnings := list -}}
+  {{- range $warning := . }}
+    {{- $warnings = append $warnings (wrap 80 (printf "WARNING: %s" $warning)) -}}
+    {{- $warnings = append $warnings "\n\n" -}}
+  {{- end -}}
+  {{- $warningString := ($warnings | join "") -}}
+  {{- $warningString -}}
+{{- end -}}
+
+{{- define "kong.getRepoTag" -}}
+{{- if .unifiedRepoTag }}
+{{- .unifiedRepoTag }}
+{{- else if .repository }}
+{{- .repository }}:{{ .tag }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+kong.kubernetesRBACRoles outputs a static list of RBAC rules (the "rules" block
+of a Role or ClusterRole) that provide the ingress controller access to the
+Kubernetes resources it uses to build Kong configuration.
+*/}}
+{{- define "kong.kubernetesRBACRules" -}}
+- apiGroups:
+  - ""
+  resources:
+  - endpoints
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - endpoints/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - services/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - kongclusterplugins
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - kongclusterplugins/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - kongconsumers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - kongconsumers/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - kongingresses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - kongingresses/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - kongplugins
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - kongplugins/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - tcpingresses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - tcpingresses/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - udpingresses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - udpingresses/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - extensions
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - extensions
+  resources:
+  - ingresses/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gatewayclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gatewayclasses/status
+  verbs:
+  - get
+  - update
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gateways
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gateways/status
+  verbs:
+  - get
+  - update
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - httproutes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - httproutes/status
+  verbs:
+  - get
+  - update
+- apiGroups:
+  - networking.internal.knative.dev
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - networking.internal.knative.dev
+  resources:
+  - ingresses/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses/status
+  verbs:
+  - get
+  - patch
+  - update
+{{- end -}}
+
+{{- define "kong.ingressVersion" -}}
+{{- if (.Capabilities.APIVersions.Has "networking.k8s.io/v1/Ingress") -}}
+networking.k8s.io/v1
+{{- else if (.Capabilities.APIVersions.Has "networking.k8s.io/v1beta1/Ingress") -}}
+networking.k8s.io/v1beta1
+{{- else -}}
+extensions/v1beta1
+{{- end -}}
 {{- end -}}

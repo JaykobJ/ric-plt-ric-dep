@@ -65,6 +65,7 @@ KUBEV="1.26.15" #1.16.0
 KUBECNIV="1.1.1" #0.7.5
 HELMV="3.14.3" #3.5.4
 DOCKERV="25.0.4" #20.10.21
+KUSTOMIZEV="5.0.3"
 
 echo running ${0}
 while getopts ":k:d:e:n:c" o; do
