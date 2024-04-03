@@ -312,6 +312,13 @@ else
   apt-get install -y $APTOPTS kubeadm=${KUBEVERSION} kubelet=${KUBEVERSION} kubectl=${KUBEVERSION}
 fi
 
+DOWNLOAD_DIR="/usr/bin"
+if [ -z ${KUSTOMIZEV} ]; then
+  curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"  | bash -s -- ${DOWNLOAD_DIR}
+else
+  curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"  | bash -s -- ${KUSTOMIZEV} ${DOWNLOAD_DIR}
+fi
+
 apt-mark hold kubernetes-cni kubelet kubeadm kubectl docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
 systemctl enable --now kubelet
@@ -322,58 +329,8 @@ kubeadm config images pull --kubernetes-version=${KUBEV}
 NODETYPE="master"
 if [ "$NODETYPE" == "master" ]; then
 
-  if [[ ${KUBEV} == 1.13.* ]]; then
-    cat <<EOF >/root/config.yaml
-apiVersion: kubeadm.k8s.io/v1alpha3
-kubernetesVersion: v${KUBEV}
-kind: ClusterConfiguration
-apiServerExtraArgs:
-  feature-gates: SCTPSupport=true
-networking:
-  dnsDomain: cluster.local
-  podSubnet: 10.244.0.0/16
-  serviceSubnet: 10.96.0.0/12
----
-apiVersion: kubeproxy.config.k8s.io/v1alpha1
-kind: KubeProxyConfiguration
-mode: ipvs
-EOF
-
-  elif [[ ${KUBEV} == 1.14.* ]]; then
-    cat <<EOF >/root/config.yaml
-apiVersion: kubeadm.k8s.io/v1beta1
-kubernetesVersion: v${KUBEV}
-kind: ClusterConfiguration
-apiServerExtraArgs:
-  feature-gates: SCTPSupport=true
-networking:
-  dnsDomain: cluster.local
-  podSubnet: 10.244.0.0/16
-  serviceSubnet: 10.96.0.0/12
----
-apiVersion: kubeproxy.config.k8s.io/v1alpha1
-kind: KubeProxyConfiguration
-mode: ipvs
-EOF
-  elif [[ ${KUBEV} == 1.15.* ]] || [[ ${KUBEV} == 1.16.* ]] || [[ ${KUBEV} == 1.18.* ]]; then
-    cat <<EOF >/root/config.yaml
-apiVersion: kubeadm.k8s.io/v1beta2
-kubernetesVersion: v${KUBEV}
-kind: ClusterConfiguration
-apiServer:
-  extraArgs:
-    feature-gates: SCTPSupport=true
-networking:
-  dnsDomain: cluster.local
-  podSubnet: 10.244.0.0/16
-  serviceSubnet: 10.96.0.0/12
----
-apiVersion: kubeproxy.config.k8s.io/v1alpha1
-kind: KubeProxyConfiguration
-mode: ipvs
-EOF
-  elif [[ ${KUBEV} == 1.2* ]]; then
-  cat <<EOF > /root/config.yaml
+  if [[ ${KUBEV} == 1.2* ]]; then
+    cat <<EOF > /root/config.yaml
 apiVersion: kubeadm.k8s.io/v1beta3
 kubernetesVersion: v${KUBEV}
 kind: ClusterConfiguration
@@ -436,7 +393,7 @@ EOF
   #kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/v0.24.0/Documentation/kube-flannel.yml"
   #kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml"
 
-  # Calico that uses kube-system namespace
+  # Latest Calico that uses the kube-system namespace
   kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.0/manifests/calico.yaml
 
   # Install Calico
@@ -453,6 +410,14 @@ EOF
 
   kubectl taint nodes --all node-role.kubernetes.io/control-plane-
   kubectl taint nodes --all node-role.kubernetes.io/master-
+
+  # Use Rancher to utilize local storage for nodes (needed for kubeflow)
+  kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.26/deploy/local-path-storage.yaml
+  
+  wait_for_pods_running 1 local-path-storage
+
+  # Set as default storage class
+  kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 
   HELMV=$(cat /opt/config/helm_version.txt)
   HELMVERSION=${HELMV}
