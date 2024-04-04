@@ -1,4 +1,4 @@
-apiVersion: networking.k8s.io/v1beta1
+apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "common.ingressname.xapp-onboarder" . }}-chartmuseum
@@ -6,7 +6,10 @@ spec:
   rules:
   - http:
       paths:
-      - path: {{ include "common.kongpath.ric.chartmuseum" . }}
+      - pathType: Prefix
+        path: {{ include "common.kongpath.ric.chartmuseum" . }}
         backend:
-          serviceName: {{ include "common.servicename.xapp-onboarder.server" . }}
-          servicePort: {{ include "common.serviceport.xapp-onboarder.chartmuseum" . }}
+          service:
+            name: {{ include "common.servicename.xapp-onboarder.server" . }}
+            port:
+              number: {{ include "common.serviceport.xapp-onboarder.chartmuseum" . }}

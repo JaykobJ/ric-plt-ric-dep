@@ -61,13 +61,11 @@ start_ipv6_if () {
   fi
 }
 
-KUBEV="1.18.0" #1.16.0
-KUBECNIV="0.7.5" #0.7.5
-HELMV="3.5.4"
-DOCKERV="20.10.21"
-
-sudo apt-get update
-
+KUBEV="1.26.15" #1.16.0
+KUBECNIV="1.1.1" #0.7.5
+HELMV="3.14.3" #3.5.4
+DOCKERV="25.0.4" #20.10.21
+KUSTOMIZEV="5.0.3"
 
 echo running ${0}
 while getopts ":k:d:e:n:c" o; do
@@ -104,11 +102,10 @@ IPV6IF=""
 
 rm -rf /opt/config
 mkdir -p /opt/config
-echo "" > /opt/config/docker_version.txt
-#echo "1.16.0" > /opt/config/k8s_version.txt
-echo "1.18.0" > /opt/config/k8s_version.txt
-echo "0.7.5" > /opt/config/k8s_cni_version.txt
-echo "3.5.4" > /opt/config/helm_version.txt
+echo "${DOCKERV}" > /opt/config/docker_version.txt
+echo "${KUBEV}" > /opt/config/k8s_version.txt
+echo "${KUBECNIV}" > /opt/config/k8s_cni_version.txt
+echo "${HELMV}" > /opt/config/helm_version.txt
 echo "$(hostname -I)" > /opt/config/host_private_ip_addr.txt
 echo "$(curl ifconfig.co)" > /opt/config/k8s_mst_floating_ip_addr.txt
 echo "$(hostname -I)" > /opt/config/k8s_mst_private_ip_addr.txt
@@ -121,13 +118,13 @@ if [[ $(cat /opt/config/stack_name.txt) == *aux* ]]; then
   ISAUX='true'
 fi
 
+apt-get update
+apt-get install -y ca-certificates curl apt-transport-https gpg
+
 modprobe -- ip_vs
 modprobe -- ip_vs_rr
 modprobe -- ip_vs_wrr
 modprobe -- ip_vs_sh
-#modprobe -- nf_conntrack_ipv4
-#modprobe -- nf_conntrack_ipv6
-#modprobe -- nf_conntrack_proto_sctp
 modprobe -- nf_conntrack
 
 if [ ! -z "$IPV6IF" ]; then
@@ -152,13 +149,14 @@ if [ ! -z $SWAPFILES ]; then
 fi
 
 
+
 echo "### Docker version  = "${DOCKERV}
 echo "### k8s version     = "${KUBEV}
 echo "### helm version    = "${HELMV}
 echo "### k8s cni version = "${KUBECNIV}
 
-KUBEVERSION="${KUBEV}-00"
-CNIVERSION="${KUBECNIV}-00"
+KUBEVERSION="${KUBEV}-1.1"
+CNIVERSION="${KUBECNIV}-1.1"
 DOCKERVERSION="${DOCKERV}"
 
 UBUNTU_RELEASE=$(lsb_release -r | sed 's/^[a-zA-Z:\t ]\+//g')
@@ -175,7 +173,8 @@ elif [[ ${UBUNTU_RELEASE} == 18.* ]]; then
 elif [[ ${UBUNTU_RELEASE} == 20.* ]]; then
   echo "Installing on Ubuntu $UBUNTU_RELEASE (Focal Fossal)"
   if [ ! -z "${DOCKERV}" ]; then
-    DOCKERVERSION="${DOCKERV}-0ubuntu1~20.04.2"  # 20.10.21-0ubuntu1~20.04.2
+    #DOCKERVERSION="${DOCKERV}-0ubuntu1~20.04.2"  # 20.10.21-0ubuntu1~20.04.2
+    DOCKERVERSION="5:${DOCKERV}-1~ubuntu.20.04~focal"
   fi
 else
   echo "Unsupported Ubuntu release ($UBUNTU_RELEASE) detected.  Exit."
@@ -188,17 +187,27 @@ echo "docker version to use = "${DOCKERVERSION}
 #echo 'deb http://apt.kubernetes.io/ kubernetes-xenial main' > /etc/apt/sources.list.d/kubernetes.list
 
 # NEW Kubernetes package repository. Does not work for < v1.24
-#sudo mkdir -p -m 755 /etc/apt/keyrings
-#sudo chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-#curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-#echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+sudo mkdir -p -m 755 /etc/apt/keyrings
+sudo chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+curl -fsSL "https://pkgs.k8s.io/core:/stable:/v1.26/deb/Release.key" | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.26/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+
+# Add Docker's official GPG key:
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+# Add the repository to Apt sources:
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
 
 mkdir -p /etc/apt/apt.conf.d
 echo "APT::Acquire::Retries \"3\";" > /etc/apt/apt.conf.d/80-retries
 
 apt-get update
-RES=$(apt-get install -y  curl jq netcat make ipset moreutils socat 2>&1)
+RES=$(apt-get install -y curl jq netcat make ipset moreutils socat 2>&1)
 if [[ $RES == */var/lib/dpkg/lock* ]]; then
   echo "Fail to get dpkg lock.  Wait for any other package installation"
   echo "process to finish, then rerun this script"
@@ -207,24 +216,65 @@ fi
 
 APTOPTS="--allow-downgrades --allow-change-held-packages --allow-unauthenticated --ignore-hold "
 
-for PKG in kubeadm docker.io; do
+for PKG in kubeadm docker-ce-cli; do
   INSTALLED_VERSION=$(dpkg --list |grep ${PKG} |tr -s " " |cut -f3 -d ' ')
   if [ ! -z ${INSTALLED_VERSION} ]; then
     if [ "${PKG}" == "kubeadm" ]; then
       kubeadm reset -f
+      apt-get purge -y $APTOPTS kubeadm kubelet kubectl kubernetes-cni
+
+      rm -rf /etc/cni/net.d
       rm -rf ~/.kube
-      apt-get -y $APTOPTS remove kubeadm kubelet kubectl kubernetes-cni
+      rm -rf /etc/cni
+      rm -rf /etc/kubernetes
+      rm -rf /var/lib/etcd
+      rm -rf /var/lib/kubelet
     else
-      apt-get -y $APTOPTS remove "${PKG}"
+      docker stop $(docker ps -a -q)
+      docker rm $(docker ps -a -q)
+      apt-get purge -y $APTOPTS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+      # Delete Docker directories
+      rm -rf /var/lib/docker /etc/docker
+      rm /etc/apparmor.d/docker
+      rm -rf /var/run/docker.sock
+      rm -rf /usr/bin/docker-compose
+      rm -rf /var/run/docker
+      rm -rf /var/lib/docker
+      rm -rf /var/lib/containerd
+      systemctl stop docker.socket
     fi
   fi
 done
-apt-get -y autoremove
+apt-get autoclean -y
+apt-get autoremove -y
+
+##
+## SETUP CONTAINER RUNTIMES
+##
+
+cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+EOF
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+# sysctl params required by setup, params persist across reboots
+cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+
+# Apply sysctl params without reboot
+sudo sysctl --system
 
 if [ -z ${DOCKERVERSION} ]; then
-  apt-get install -y $APTOPTS docker.io
+  apt-get install -y $APTOPTS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 else
-  apt-get install -y $APTOPTS docker.io=${DOCKERVERSION}
+  apt-get install -y $APTOPTS docker-ce=$DOCKERVERSION docker-ce-cli=$DOCKERVERSION containerd.io docker-buildx-plugin docker-compose-plugin
 fi
 cat > /etc/docker/daemon.json <<EOF
 {
@@ -236,56 +286,42 @@ cat > /etc/docker/daemon.json <<EOF
   "storage-driver": "overlay2"
 }
 EOF
+
+rm /etc/containerd/config.toml
+containerd config default > /etc/containerd/config.toml
+sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml
+#sed -i 's@sandbox_image = \"registry.k8s.io\/pause:3.6\"@sandbox_image = \"registry.k8s.io\/pause:3.9\"@g' /etc/containerd/config.toml
+
 mkdir -p /etc/systemd/system/docker.service.d
 systemctl enable docker.service
+systemctl enable containerd.service
 systemctl daemon-reload
 systemctl restart docker
+systemctl restart containerd
+
 
 if [ -z ${CNIVERSION} ]; then
   apt-get install -y $APTOPTS kubernetes-cni
 else
-  #apt-get install -y $APTOPTS kubernetes-cni
-  #apt-get install -y $APTOPTS kubernetes-cni=${CNIVERSION}
-  # Install CNI plugins
-  CNI_PLUGINS_VERSION="v0.7.5"
-  ARCH="amd64"
-  DEST="/opt/cni/bin"
-  sudo mkdir -p "$DEST"
-  curl -L "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}/cni-plugins-${ARCH}-${CNI_PLUGINS_VERSION}.tgz" | sudo tar -C "$DEST" -xz
+  apt-get install -y $APTOPTS kubernetes-cni=${CNIVERSION}
 fi
 
 if [ -z ${KUBEVERSION} ]; then
   apt-get install -y $APTOPTS kubeadm kubelet kubectl
 else
-  #apt-get install -y $APTOPTS kubeadm kubelet kubectl
-  #apt-get install -y $APTOPTS kubeadm=${KUBEVERSION} kubelet=${KUBEVERSION} kubectl=${KUBEVERSION}
-  # Define the directory to download command files
-  DOWNLOAD_DIR="/usr/bin"
-
-  # Install crictl (required for kubeadm / Kubelet Container Runtime Interface (CRI))
-  CRICTL_VERSION="v1.18.0"
-  ARCH="amd64"
-  curl -L "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz" | sudo tar -C $DOWNLOAD_DIR -xz
-
-  # Install kubeadm, kubelet and add a kubelet systemd service:
-  RELEASE="v1.18.0"
-  ARCH="amd64"
-  cd $DOWNLOAD_DIR
-  sudo curl -L --remote-name-all https://dl.k8s.io/release/${RELEASE}/bin/linux/${ARCH}/{kubeadm,kubelet}
-  sudo chmod +x {kubeadm,kubelet}
-
-  RELEASE_VERSION="v0.3.0"
-  curl -sSL "https://raw.githubusercontent.com/kubernetes/release/${RELEASE_VERSION}/cmd/kubepkg/templates/latest/deb/kubelet/lib/systemd/system/kubelet.service" | sed "s:/usr/bin:${DOWNLOAD_DIR}:g" | sudo tee /etc/systemd/system/kubelet.service
-  sudo mkdir -p /etc/systemd/system/kubelet.service.d
-  curl -sSL "https://raw.githubusercontent.com/kubernetes/release/${RELEASE_VERSION}/cmd/kubepkg/templates/latest/deb/kubeadm/10-kubeadm.conf" | sed "s:/usr/bin:${DOWNLOAD_DIR}:g" | sudo tee /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-
-  # Install kubectl
-  cd ~/nsoran/ric-dep/bin
-  curl -LO https://dl.k8s.io/release/${RELEASE}/bin/linux/${ARCH}/kubectl
-  sudo install -o root -g root -m 0755 kubectl /usr/bin/kubectl
+  apt-get install -y $APTOPTS kubeadm=${KUBEVERSION} kubelet=${KUBEVERSION} kubectl=${KUBEVERSION}
 fi
 
-apt-mark hold docker.io kubernetes-cni kubelet kubeadm kubectl
+DOWNLOAD_DIR="/usr/bin"
+if [ -z ${KUSTOMIZEV} ]; then
+  curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"  | bash -s -- ${DOWNLOAD_DIR}
+else
+  curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"  | bash -s -- ${KUSTOMIZEV} ${DOWNLOAD_DIR}
+fi
+
+apt-mark hold kubernetes-cni kubelet kubeadm kubectl docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+systemctl enable --now kubelet
 
 kubeadm config images pull --kubernetes-version=${KUBEV}
 
@@ -293,73 +329,26 @@ kubeadm config images pull --kubernetes-version=${KUBEV}
 NODETYPE="master"
 if [ "$NODETYPE" == "master" ]; then
 
-  if [[ ${KUBEV} == 1.13.* ]]; then
-    cat <<EOF >/root/config.yaml
-apiVersion: kubeadm.k8s.io/v1alpha3
+  if [[ ${KUBEV} == 1.2* ]]; then
+    cat <<EOF > /root/config.yaml
+apiVersion: kubeadm.k8s.io/v1beta3
 kubernetesVersion: v${KUBEV}
 kind: ClusterConfiguration
-apiServerExtraArgs:
-  feature-gates: SCTPSupport=true
 networking:
   dnsDomain: cluster.local
-  podSubnet: 10.244.0.0/16
-  serviceSubnet: 10.96.0.0/12
+  podSubnet: 192.168.0.0/16
+  serviceSubnet: 172.16.0.0/12
 ---
 apiVersion: kubeproxy.config.k8s.io/v1alpha1
 kind: KubeProxyConfiguration
 mode: ipvs
-EOF
-
-  elif [[ ${KUBEV} == 1.14.* ]]; then
-    cat <<EOF >/root/config.yaml
-apiVersion: kubeadm.k8s.io/v1beta1
-kubernetesVersion: v${KUBEV}
-kind: ClusterConfiguration
-apiServerExtraArgs:
-  feature-gates: SCTPSupport=true
-networking:
-  dnsDomain: cluster.local
-  podSubnet: 10.244.0.0/16
-  serviceSubnet: 10.96.0.0/12
+ipvs:
+  excludeCIDRs: ["10.0.0.0/8"]
 ---
-apiVersion: kubeproxy.config.k8s.io/v1alpha1
-kind: KubeProxyConfiguration
-mode: ipvs
+kind: KubeletConfiguration
+apiVersion: kubelet.config.k8s.io/v1beta1
+cgroupDriver: systemd
 EOF
-  elif [[ ${KUBEV} == 1.15.* ]] || [[ ${KUBEV} == 1.16.* ]] || [[ ${KUBEV} == 1.18.* ]]; then
-    cat <<EOF >/root/config.yaml
-apiVersion: kubeadm.k8s.io/v1beta2
-kubernetesVersion: v${KUBEV}
-kind: ClusterConfiguration
-apiServer:
-  extraArgs:
-    feature-gates: SCTPSupport=true
-networking:
-  dnsDomain: cluster.local
-  podSubnet: 10.244.0.0/16
-  serviceSubnet: 10.96.0.0/12
----
-apiVersion: kubeproxy.config.k8s.io/v1alpha1
-kind: KubeProxyConfiguration
-mode: ipvs
-EOF
-#  elif [[ ${KUBEV} == 1.2* ]]; then
-#  cat <<EOF > /root/config.yaml
-#apiVersion: kubeadm.k8s.io/v1beta3
-#kubernetesVersion: v${KUBEV}
-#kind: ClusterConfiguration
-#apiServer:
-#  extraArgs:
-#    feature-gates: SCTPSupport=true
-#networking:
-#  dnsDomain: cluster.local
-#  podSubnet: 10.244.0.0/16
-#  serviceSubnet: 10.96.0.0/12
-#---
-#apiVersion: kubeproxy.config.k8s.io/v1alpha1
-#kind: KubeProxyConfiguration
-#mode: ipvs
-#EOF
   else
     echo "Unsupported Kubernetes version requested.  Bail."
     exit
@@ -397,14 +386,38 @@ EOF
   export KUBECONFIG=/root/.kube/config
   echo "KUBECONFIG=${KUBECONFIG}" >> /etc/environment
 
-  kubectl get pods --all-namespaces
+  kubectl get nodes --all-namespaces
 
   # we refer to version 0.18.1 because later versions use namespace kube-flannel instead of kube-system TODO
-  kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/v0.18.1/Documentation/kube-flannel.yml"
+  #kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/v0.18.1/Documentation/kube-flannel.yml"
+  #kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/v0.24.0/Documentation/kube-flannel.yml"
+  #kubectl apply -f "https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml"
 
-  wait_for_pods_running 8 kube-system
+  # Latest Calico that uses the kube-system namespace
+  kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.0/manifests/calico.yaml
 
+  # Install Calico
+  # NOTE: Due to the large size of the CRD bundle, kubectl apply might exceed request limits. Instead, use kubectl create or kubectl replace.
+  # 1) Install the Tigera Calico operator and custom resource definitions.
+  #kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.2/manifests/tigera-operator.yaml
+  # 2) Install Calico by creating the necessary custom resource
+  #curl -O https://raw.githubusercontent.com/projectcalico/calico/v3.27.2/manifests/custom-resources.yaml
+  #sed -i 's@cidr: 192.168.0.0\/16@cidr: 10.244.0.0\/16@g' custom-resources.yaml
+  #kubectl create -f custom-resources.yaml
+  #kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.2/manifests/custom-resources.yaml
+
+  wait_for_pods_running 9 kube-system
+
+  kubectl taint nodes --all node-role.kubernetes.io/control-plane-
   kubectl taint nodes --all node-role.kubernetes.io/master-
+
+  # Use Rancher to utilize local storage for nodes (needed for kubeflow)
+  kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.26/deploy/local-path-storage.yaml
+  
+  wait_for_pods_running 1 local-path-storage
+
+  # Set as default storage class
+  kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 
   HELMV=$(cat /opt/config/helm_version.txt)
   HELMVERSION=${HELMV}

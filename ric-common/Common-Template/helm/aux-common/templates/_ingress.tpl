@@ -4,10 +4,13 @@
   - http:
       paths:
 {{- range .Values.ingress.service }}
-        - path: {{  printf "/%s" (required "baseaddr" .baseaddr) }}
+        - pathType: Prefix
+          path: {{  printf "/%s" (required "baseaddr" .baseaddr) }}
           backend:
-            serviceName: {{ .name }}
-            servicePort: {{ .port }}
+            service:
+              name: {{ .name }}
+              port:
+                number: {{ .port }}
 {{- end -}}
 {{- else if .Values.ingress.service -}}
 {{- $burl := (required "baseurl" .Values.global.ingress.virtualhost.baseurl) -}}
@@ -16,14 +19,19 @@
     http:
       paths:
       - backend:
-          serviceName: {{ .name }}
-          servicePort: {{ .port }}
+          service:
+            name: {{ .name }}
+            port:
+              number: {{ .port }}
 {{- end -}}
 {{- else -}}
-        - path: {{ printf "/%s" .Chart.Name }}
+        - pathType: Prefix
+          path: {{ printf "/%s" .Chart.Name }}
           backend:
-            serviceName: {{ .Chart.Name }}
-            servicePort: {{ .Values.service.externalPort }}
+            service:
+              name: {{ .Chart.Name }}
+              port:
+                number: {{ .Values.service.externalPort }}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -60,7 +68,7 @@ nginx.ingress.kubernetes.io/ssl-redirect: "false"
 {{- if .Values.ingress -}}
 {{- if .Values.global.ingress -}}
 {{- if and .Values.ingress.enabled .Values.global.ingress.enabled -}}
-apiVersion: extensions/v1beta1
+apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "common.fullname" . }}-ingress
