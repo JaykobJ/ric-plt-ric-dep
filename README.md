@@ -273,7 +273,7 @@ metadata:
 spec:
   containers:
   - name: ns-3-pod
-    image: ns3:latest
+    image: docker.io/library/ns3:latest
     imagePullPolicy: Never
     command: ["sleep", "infinity"]
 ```
