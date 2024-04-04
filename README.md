@@ -352,6 +352,8 @@ Test if you can access Kubeflow dashboard. (You should get 302 Found redirect st
 curl --proxy socks5h://localhost:9999 -v http://localhost:8080
 ```
 
+In case you run into issues, check that `/etc/ssh/sshd_config` has `AllowTcpForwarding yes` (or `AllowTcpForwarding local` for service under localhost) to allow the proxy.
+
 I'm using Chrome as my main browser so I set up Firefow to proxy SOCKS5 at localhost:9999
 
 1. Open Firefox
