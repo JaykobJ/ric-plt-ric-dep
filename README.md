@@ -342,7 +342,7 @@ kubectl port-forward svc/istio-ingressgateway -n istio-system 8080:80
 
 #### **NOTE** If the cluster is running on remote/cloud server/VM, use the following to acces Kubeflow dashboard
 
-Setup a SOCKS5 tunnel via ssh
+Setup a SOCKS5 tunnel via ssh (*for more elegant solution see [here](https://ketzacoatl.github.io/posts/2017-01-10-SOCKS-proxy-with-SSH-to-save-the-day.html)*)
 ```
 ssh -D9999 user@remote-server
 ```
@@ -354,7 +354,7 @@ curl --proxy socks5h://localhost:9999 -v http://localhost:8080
 
 In case you run into issues, check that `/etc/ssh/sshd_config` has `AllowTcpForwarding yes` (or `AllowTcpForwarding local` for service under localhost) to allow the proxy.
 
-I'm using Chrome as my main browser so I set up Firefow to proxy SOCKS5 at localhost:9999
+I'm using Chrome as my main browser so I set up Firefow to proxy SOCKS5 at localhost:9999. *More information on [proxying localhost](https://www.developsec.com/2020/05/29/proxying-localhost-on-firefox/)*
 
 1. Open Firefox
 2. Navigate to Settings
