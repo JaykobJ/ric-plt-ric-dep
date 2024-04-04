@@ -333,6 +333,44 @@ Setup the xapp into the RIC platform
 
 &nbsp;
 
+## Interact with Kubeflow
+
+The default way of accessing Kubeflow is via port-forward. This enables you to get started quickly without imposing any requirements on your environment. Run the following to port-forward Istio's Ingress-Gateway to local port 8080:
+```
+kubectl port-forward svc/istio-ingressgateway -n istio-system 8080:80
+```
+
+#### **NOTE** If the cluster is running on remote/cloud server/VM, use the following to acces Kubeflow dashboard
+
+Setup a SOCKS5 tunnel via ssh
+```
+ssh -D9999 user@remote-server
+```
+
+Test if you can access Kubeflow dashboard. (You should get 302 Found redirect status response code with location: "/dex/auth?client_id=kubeflow-oidc-authservice&redirect_uri=...")
+```
+curl --proxy socks5h://localhost:9999 -v http://localhost:8080
+```
+
+I'm using Chrome as my main browser so I set up Firefow to proxy SOCKS5 at localhost:9999
+
+1. Open Firefox
+2. Navigate to Settings
+3. Select 'Settings...' under Network Settings
+4. Select 'Manual proxy configuration'
+5. Set the following parameters: SOCKS Host = localhost, Port = 9999
+6. Select 'Proxy DNS when using SOCKS v5'
+7. On navigation panel type 'about:config'
+8. On search panel type 'network.proxy'
+9. Set 'network.proxy.allow_hijacking_localhost' to true
+10. Now you should be able to access Kubeflow dashboard on 'localhost:8080'
+11. Default user's credentials are 'user\<at\>example.com' and '12341234'
+
+
+&nbsp;
+
+&nbsp;
+
 ## Run ns3
 
 Get E2Term IP addr from the following output
